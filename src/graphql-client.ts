@@ -71,6 +71,11 @@ const PROTOCOL = 'graphql-transport-ws'
 export const FADER_MIN_DB = -90
 export const FADER_MAX_DB = 10
 
+/** Pull a readable operation name out of a query body, e.g. `updateFader` from `mutation($n:Int){ updateFader(...` */
+function operationName(query: string): string {
+	return /\{\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(query)?.[1] ?? query.slice(0, 40)
+}
+
 /** The console mixes RFC-6902 pointers (`/faders/0`) with non-standard `/faders[0]`; normalize the latter. */
 function normalizePointer(op: Operation): Operation {
 	const fix = (p: string) => p.replace(/\[(\d+)\]/g, '/$1')
@@ -114,7 +119,7 @@ export class CalrecGraphQLClient extends EventEmitter {
 	private readonly subscriptions = new Map<string, Subscription>()
 	private readonly pendingRequests = new Map<
 		string,
-		{ resolve: (value: unknown) => void; reject: (err: Error) => void }
+		{ name: string; resolve: (value: unknown) => void; reject: (err: Error) => void }
 	>()
 
 	/** Latest known per-fader state, keyed by 0-based fader number. */
@@ -126,6 +131,8 @@ export class CalrecGraphQLClient extends EventEmitter {
 	private subscribedSections = 0
 	/** In-flight/queued relative level steps, keyed by fader number. */
 	private readonly levelQueues = new Map<number, LevelQueue>()
+	/** Subscription error messages already warned about, so a repeating error doesn't flood the log. */
+	private readonly warnedSubscriptionErrors = new Set<string>()
 
 	constructor(options: CalrecGraphQLClientOptions) {
 		super()
@@ -352,18 +359,21 @@ export class CalrecGraphQLClient extends EventEmitter {
 	/** Run a one-shot operation (mutation/query) and resolve with its data. */
 	private async request(query: string, variables: Record<string, unknown> = {}): Promise<unknown> {
 		const id = `req_${++this.nextRequestId}`
+		const name = operationName(query)
 		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 			throw new Error('Not connected to console')
 		}
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				if (this.pendingRequests.delete(id)) {
+					this.log('debug', `Timed out waiting for a response to ${name} (${id})`)
 					this.emit('requestTimeout')
 					reject(new Error('Request timed out (console did not answer)'))
 				}
 			}, 5000)
 
 			this.pendingRequests.set(id, {
+				name,
 				resolve: (value) => {
 					clearTimeout(timer)
 					this.emit('requestSuccess')
@@ -375,7 +385,7 @@ export class CalrecGraphQLClient extends EventEmitter {
 				},
 			})
 
-			this.log('debug', `-> ${id} ${query} ${JSON.stringify(variables)}`)
+			this.log('debug', `Sending GraphQL request ${name} (${id}): ${JSON.stringify(variables)}`)
 			this.send({ id, type: 'subscribe', payload: { query, variables } })
 		})
 	}
@@ -387,7 +397,7 @@ export class CalrecGraphQLClient extends EventEmitter {
 			this.pendingRequests.delete(id)
 			// Stop the server-side operation; one-shots only ever need the first frame.
 			this.send({ id, type: 'complete' })
-			this.log('debug', `<- ${id} ${JSON.stringify(payload)}`)
+			this.log('debug', `Received GraphQL response for ${pending.name} (${id}): ${JSON.stringify(payload)}`)
 			const requestError = payload?.errors?.[0]?.message
 			if (requestError) {
 				pending.reject(new Error(requestError))
@@ -410,7 +420,11 @@ export class CalrecGraphQLClient extends EventEmitter {
 		const errorMessage = payload?.errors?.[0]?.message
 		// NO_PATH is expected for unassigned surface faders; don't treat it as an error.
 		if (errorMessage && errorMessage !== 'NO_PATH') {
-			this.log('debug', `Subscription ${id} error: ${errorMessage}`)
+			// Warn once per distinct message: a rejected section subscription is why no fader state arrives.
+			if (!this.warnedSubscriptionErrors.has(errorMessage)) {
+				this.warnedSubscriptionErrors.add(errorMessage)
+				this.log('warn', `Console rejected subscription ${JSON.stringify(sub.variables)}: ${errorMessage}`)
+			}
 		}
 		sub.document = this.reduceData(sub.document, payload)
 		sub.onDocument(sub.document)
@@ -547,6 +561,37 @@ export class CalrecGraphQLClient extends EventEmitter {
 		if (!prev || prev.levelTenthDb !== next.levelTenthDb) this.emit('faderLevelChange', faderNumber, next.levelTenthDb)
 		if (!prev || prev.isCut !== next.isCut) this.emit('faderCutChange', faderNumber, next.isCut)
 		if (!prev || prev.isPfl !== next.isPfl) this.emit('faderPflChange', faderNumber, next.isPfl)
+	}
+
+	/**
+	 * Human-readable snapshot of what we know about the console. This is the first thing to ask a site for
+	 * when actions fail: it shows whether fader state actually arrived, and how each fader is addressed.
+	 */
+	public describeState(limit = Number.POSITIVE_INFINITY): string[] {
+		const lines = [
+			`Connection: ${this.isConnected ? 'open' : 'closed'} to ${this.wsUrl} as "${this.username}"`,
+			`Mixer constants: ${this.numberOfFaders} faders, ${this.numberOfSections} sections, ` +
+				`${this.numberOfFadersPerSection} per section (subscribed to ${this.subscribedSections})`,
+		]
+
+		const tracked = [...this.faders.values()].sort((a, b) => a.faderNumber - b.faderNumber)
+		const withPath = tracked.filter((f) => f.pathId)
+		lines.push(`Fader state received for ${tracked.length} faders, ${withPath.length} with a path assigned`)
+		if (tracked.length === 0) {
+			lines.push('No fader state at all — section subscriptions returned nothing, so no fader can be driven')
+			return lines
+		}
+
+		for (const fader of tracked.slice(0, limit)) {
+			lines.push(
+				`  Fader ${fader.faderNumber + 1} (faderNumber ${fader.faderNumber}): ` +
+					`path=${fader.pathId ?? 'none'} faderId=${fader.faderId ?? 'none'} ` +
+					`level=${(fader.levelTenthDb / 10).toFixed(1)}dB cut=${fader.isCut} pfl=${fader.isPfl} ` +
+					`label="${fader.label}"`,
+			)
+		}
+		if (tracked.length > limit) lines.push(`  ... and ${tracked.length - limit} more`)
+		return lines
 	}
 
 	// --- Mutations -----------------------------------------------------------

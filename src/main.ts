@@ -30,6 +30,8 @@ export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 		try {
 			this.updateStatus(InstanceStatus.Connecting)
 			await this.configUpdated(config, secrets)
+			// One-shot: log what the console reported, as a baseline for diagnosing connection issues.
+			this.client.once('ready', () => setTimeout(() => this.logConsoleSnapshot(24), 5000))
 			this.log('info', 'init() completed successfully')
 		} catch (e: unknown) {
 			this.log('error', `init() failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -143,6 +145,11 @@ export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 			this.faderStates.set(faderId, state)
 			setVariableWithDeclaration(this, `fader_${faderId + 1}_label`, label)
 		})
+	}
+
+	/** Dump what the module knows about the console to the log — the first thing to ask a site for. */
+	private logConsoleSnapshot(limit: number): void {
+		this.log('debug', this.client.describeState(limit).join('\n'))
 	}
 
 	/** Fader count from the mixer; 0 until `mixer.constants` has been received. */
