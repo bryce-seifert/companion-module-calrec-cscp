@@ -1,8 +1,8 @@
+import { combineRgb, type CompanionFeedbackDefinitions } from '@companion-module/base'
 import type { CalrecInstance } from './main.js'
-import { type CompanionFeedbackDefinitions, combineRgb } from '@companion-module/base'
 
 export function GetFeedbacks(instance: CalrecInstance): CompanionFeedbackDefinitions {
-	const maxFaders = instance.config?.maxFaderCount ?? 128
+	const maxFaders = instance.getMaxFaderCount()
 	return {
 		fader_cut_state: {
 			type: 'boolean',
@@ -10,7 +10,7 @@ export function GetFeedbacks(instance: CalrecInstance): CompanionFeedbackDefinit
 			description: 'Change style if a fader is cut (muted)',
 			defaultStyle: {
 				color: combineRgb(255, 255, 255),
-				bgcolor: combineRgb(255, 0, 0),
+				bgcolor: combineRgb(170, 48, 41),
 			},
 			options: [
 				{
@@ -34,7 +34,7 @@ export function GetFeedbacks(instance: CalrecInstance): CompanionFeedbackDefinit
 			description: 'Change style if a fader has PFL active',
 			defaultStyle: {
 				color: combineRgb(0, 0, 0),
-				bgcolor: combineRgb(255, 255, 0),
+				bgcolor: combineRgb(132, 198, 80),
 			},
 			options: [
 				{

@@ -1,4 +1,4 @@
-# companion-module-calrec-cscp
+# companion-module-calrec-assist
 
 See [HELP.md](./companion/HELP.md) and [LICENSE](./LICENSE)
 

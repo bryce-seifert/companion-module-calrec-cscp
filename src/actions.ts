@@ -1,5 +1,6 @@
-import type { CalrecInstance } from './main.js'
 import type { CompanionActionDefinitions } from '@companion-module/base'
+import { channelLevelToDb } from './conversions.js'
+import type { CalrecInstance } from './main.js'
 
 export function GetActions(instance: CalrecInstance): CompanionActionDefinitions {
 	return {
@@ -26,19 +27,11 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 				},
 			],
 			callback: async (action) => {
-				const faderId = (action.options.faderId as number) - 1 // Convert from UI (1-based) to library (0-based)
-				const isMain = action.options.isMain as boolean
+				const faderId = (action.options.faderId as number) - 1 // UI (1-based) -> protocol (0-based)
 				const level = action.options.level as number
 
 				try {
-					if (isMain) {
-						// For main faders, we need to convert to dB first
-						const { dbToMainLevel } = await import('@bitfocusas/calrec-cscp')
-						const dbLevel = dbToMainLevel(level)
-						await instance.client.setMainFaderLevelDb(faderId, dbLevel)
-					} else {
-						await instance.client.setFaderLevel(faderId, level)
-					}
+					await instance.client.setFaderLevelDb(faderId, channelLevelToDb(level))
 					instance.log('debug', `Set fader ${faderId + 1} level to ${level}`)
 				} catch (e: unknown) {
 					instance.log(
@@ -70,16 +63,11 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 				},
 			],
 			callback: async (action) => {
-				const faderId = (action.options.faderId as number) - 1 // Convert from UI (1-based) to library (0-based)
-				const isMain = action.options.isMain as boolean
+				const faderId = (action.options.faderId as number) - 1
 				const levelDb = action.options.levelDb as number
 
 				try {
-					if (isMain) {
-						await instance.client.setMainFaderLevelDb(faderId, levelDb)
-					} else {
-						await instance.client.setFaderLevelDb(faderId, levelDb)
-					}
+					await instance.client.setFaderLevelDb(faderId, levelDb)
 					instance.log('debug', `Set fader ${faderId + 1} level to ${levelDb} dB`)
 				} catch (e: unknown) {
 					instance.log(
@@ -114,32 +102,22 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 				},
 			],
 			callback: async (action) => {
-				const faderId = (action.options.faderId as number) - 1 // Convert from UI (1-based) to library (0-based)
-				const isMain = action.options.isMain as boolean
+				const faderId = (action.options.faderId as number) - 1
 				const state = action.options.state as string
 
 				try {
 					let targetPfl: boolean
-
 					if (state === 'toggle') {
-						// Use our maintained state for toggle
 						const currentState = instance.faderStates.get(faderId)
-						targetPfl = currentState ? !currentState.isPfl : true // Default to true if no state
+						targetPfl = currentState ? !currentState.isPfl : true
 					} else {
 						targetPfl = state === 'on'
 					}
 
-					if (isMain) {
-						await instance.client.setMainFaderPfl(faderId, targetPfl)
-					} else {
-						await instance.client.setFaderPfl(faderId, targetPfl)
-					}
+					await instance.client.setFaderPfl(faderId, targetPfl)
 					instance.log('debug', `Set fader ${faderId + 1} PFL to ${targetPfl}`)
 				} catch (e: unknown) {
-					instance.log(
-						'error',
-						`Failed to set fader ${faderId + 1} PFL: ${e instanceof Error ? e.message : String(e)}`,
-					)
+					instance.log('error', `Failed to set fader ${faderId + 1} PFL: ${e instanceof Error ? e.message : String(e)}`)
 				}
 			},
 		},
@@ -167,16 +145,14 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 				},
 			],
 			callback: async (action) => {
-				const faderId = (action.options.faderId as number) - 1 // Convert from UI (1-based) to library (0-based)
+				const faderId = (action.options.faderId as number) - 1
 				const state = action.options.state as string
 
 				try {
 					let targetCut: boolean
-
 					if (state === 'toggle') {
-						// Use our maintained state for toggle
 						const currentState = instance.faderStates.get(faderId)
-						targetCut = currentState ? !currentState.isCut : true // Default to true if no state
+						targetCut = currentState ? !currentState.isCut : true
 					} else {
 						targetCut = state === 'on'
 					}
@@ -184,10 +160,7 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 					await instance.client.setFaderCut(faderId, targetCut)
 					instance.log('debug', `Set fader ${faderId + 1} cut to ${targetCut}`)
 				} catch (e: unknown) {
-					instance.log(
-						'error',
-						`Failed to set fader ${faderId + 1} cut: ${e instanceof Error ? e.message : String(e)}`,
-					)
+					instance.log('error', `Failed to set fader ${faderId + 1} cut: ${e instanceof Error ? e.message : String(e)}`)
 				}
 			},
 		},
@@ -213,15 +186,11 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 				},
 			],
 			callback: async (action) => {
-				const faderId = (action.options.faderId as number) - 1 // Convert from UI (1-based) to library (0-based)
+				const faderId = (action.options.faderId as number) - 1
 				const stepDb = action.options.stepDb as number
 
 				try {
-					// Get current level in dB
-					const currentDb = await instance.client.getFaderLevelDb(faderId)
-					const newDb = Math.min(10, currentDb + stepDb) // Clamp to max 10dB
-
-					await instance.client.setFaderLevelDb(faderId, newDb)
+					const newDb = await instance.client.adjustFaderLevelDb(faderId, stepDb)
 					instance.log('debug', `Increased fader ${faderId + 1} level by ${stepDb} dB to ${newDb} dB`)
 				} catch (e: unknown) {
 					instance.log(
@@ -252,15 +221,11 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 				},
 			],
 			callback: async (action) => {
-				const faderId = (action.options.faderId as number) - 1 // Convert from UI (1-based) to library (0-based)
+				const faderId = (action.options.faderId as number) - 1
 				const stepDb = action.options.stepDb as number
 
 				try {
-					// Get current level in dB
-					const currentDb = await instance.client.getFaderLevelDb(faderId)
-					const newDb = Math.max(-90, currentDb - stepDb) // Clamp to min -90dB
-
-					await instance.client.setFaderLevelDb(faderId, newDb)
+					const newDb = await instance.client.adjustFaderLevelDb(faderId, -stepDb)
 					instance.log('debug', `Decreased fader ${faderId + 1} level by ${stepDb} dB to ${newDb} dB`)
 				} catch (e: unknown) {
 					instance.log(

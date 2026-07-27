@@ -1,12 +1,12 @@
 {
-	"id": "calrec-cscp",
-	"name": "calrec-cscp",
-	"shortname": "cscp",
-	"description": "Calrec CSCP",
-	"version": "1.0.1",
+	"id": "calrec-assist",
+	"name": "calrec-assist",
+	"shortname": "calrec",
+	"description": "Calrec Assist",
+	"version": "0.0.0",
 	"license": "MIT",
-	"repository": "git+https://github.com/bitfocus/companion-module-calrec-cscp.git",
-	"bugs": "https://github.com/bitfocus/companion-module-calrec-cscp/issues",
+	"repository": "git+https://github.com/bitfocus/companion-module-calrec-assist.git",
+	"bugs": "https://github.com/bitfocus/companion-module-calrec-assist/issues",
 	"maintainers": [
 		{
 			"name": "William Viker",
@@ -21,6 +21,6 @@
 	},
 	"legacyIds": [],
 	"manufacturer": "Calrec",
-	"products": ["CSCP"],
-	"keywords": ["serial", "protocol", "cscp"]
+	"products": ["Assist"],
+	"keywords": ["audio", "mixer"]
 }

@@ -1,12 +1,17 @@
-import { InstanceBase, runEntrypoint, InstanceStatus, type SomeCompanionConfigField } from '@companion-module/base'
-import { CalrecClient } from '@bitfocusas/calrec-cscp'
-import { GetConfigFields, type CalrecConfig } from './config.js'
+import { InstanceBase, InstanceStatus, runEntrypoint, type SomeCompanionConfigField } from '@companion-module/base'
 import { GetActions } from './actions.js'
+import { GetConfigFields, type CalrecConfig, type CalrecSecrets } from './config.js'
+import { dbToChannelLevel } from './conversions.js'
 import { GetFeedbacks } from './feedbacks.js'
+import { CalrecGraphQLClient } from './graphql-client.js'
 import { GetPresets } from './presets.js'
+import { UpgradeScripts } from './upgrades.js'
 import { setVariableWithDeclaration } from './variables.js'
 
 interface FaderState {
+	/** Console-native level in tenths of a dB (+10 dB = 100). */
+	levelTenthDb: number
+	/** 0-1023 protocol level kept for variable continuity with the old CSCP module. */
 	level: number
 	levelDb: string
 	isCut: boolean
@@ -14,29 +19,17 @@ interface FaderState {
 	label: string
 }
 
-export class CalrecInstance extends InstanceBase<CalrecConfig> {
+export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 	public config!: CalrecConfig
-	public client!: CalrecClient
+	public secrets!: CalrecSecrets
+	public client!: CalrecGraphQLClient
 	public faderStates: Map<number, FaderState> = new Map()
-	public mainFaderStates: Map<number, { level: number; isPfl: boolean; label: string }> = new Map()
-	public auxOutputLevels: Map<number, number> = new Map()
-	public auxRouting: Map<number, boolean[]> = new Map()
-	public mainRouting: Map<number, boolean[]> = new Map()
-	public stereoImages: Map<number, { leftToBoth: boolean; rightToBoth: boolean }> = new Map()
-	public faderAssignments: Map<number, unknown> = new Map()
-	public availableAuxes: boolean[] = []
-	public availableMains: boolean[] = []
 
-	async init(config: CalrecConfig): Promise<void> {
+	async init(config: CalrecConfig, _isFirstInit: boolean, secrets: CalrecSecrets): Promise<void> {
 		this.log('info', 'init() called')
 		try {
 			this.updateStatus(InstanceStatus.Connecting)
-			await this.configUpdated(config)
-
-			// Initialize module components
-			this.setActionDefinitions(GetActions(this))
-			this.setFeedbackDefinitions(GetFeedbacks(this))
-			this.setPresetDefinitions(GetPresets(this))
+			await this.configUpdated(config, secrets)
 			this.log('info', 'init() completed successfully')
 		} catch (e: unknown) {
 			this.log('error', `init() failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -52,36 +45,36 @@ export class CalrecInstance extends InstanceBase<CalrecConfig> {
 		this.log('debug', 'destroy')
 	}
 
-	async configUpdated(config: CalrecConfig): Promise<void> {
+	async configUpdated(config: CalrecConfig, secrets: CalrecSecrets): Promise<void> {
 		this.log('info', 'configUpdated() called')
-		try {
-			this.config = config
-			this.updateStatus(InstanceStatus.Connecting)
+		this.config = config
+		this.secrets = secrets
+		this.updateStatus(InstanceStatus.Connecting)
 
-			if (this.client) {
-				this.client.disconnect()
-			}
+		// Actions are fixed; presets/feedbacks wait for mixer.constants.numberOfFaders.
+		this.setActionDefinitions(GetActions(this))
+		this.setFeedbackDefinitions(GetFeedbacks(this))
+		this.setPresetDefinitions(GetPresets(this))
 
-			this.client = new CalrecClient({
-				host: this.config.host,
-				port: this.config.port,
-				maxFaderCount: 192,
-				maxMainCount: 16,
-			})
-
-			this.setupEventListeners()
-
-			try {
-				await this.client.connect()
-			} catch (e: unknown) {
-				this.updateStatus(InstanceStatus.ConnectionFailure, 'Failed to connect')
-				this.log('error', `Connection failed: ${e instanceof Error ? e.message : String(e)}`)
-			}
-			this.log('info', 'configUpdated() completed successfully')
-		} catch (e: unknown) {
-			this.log('error', `configUpdated() failed: ${e instanceof Error ? e.message : String(e)}`)
-			throw e
+		if (this.client) {
+			this.client.disconnect()
 		}
+
+		this.client = new CalrecGraphQLClient({
+			host: this.config.host,
+			port: this.config.port,
+			username: this.config.username,
+			password: this.secrets.password ?? '',
+			log: (level, message) => this.log(level, message),
+		})
+
+		this.setupEventListeners()
+
+		// Connect in the background so init() returns promptly (Companion times out a slow init()).
+		this.client.connect().catch((e: unknown) => {
+			this.updateStatus(InstanceStatus.ConnectionFailure, 'Failed to connect')
+			this.log('error', `Connection failed: ${e instanceof Error ? e.message : String(e)}`)
+		})
 	}
 
 	getConfigFields(): SomeCompanionConfigField[] {
@@ -89,136 +82,79 @@ export class CalrecInstance extends InstanceBase<CalrecConfig> {
 	}
 
 	private setupEventListeners(): void {
-		this.log('info', 'setupEventListeners() called')
-		try {
-			this.client.on('connect', () => {
-				this.log('info', 'Connected to Calrec console')
-				this.updateStatus(InstanceStatus.Ok)
-			})
+		this.client.on('connect', () => {
+			this.log('info', 'Connected to Calrec console')
+			this.updateStatus(InstanceStatus.Ok)
+		})
 
-			this.client.on('ready', async () => {
-				this.log('info', 'Calrec console is ready')
-				let availableAuxes = this.availableAuxes
-				if (!availableAuxes || availableAuxes.length === 0) {
-					await new Promise((resolve) => {
-						const timeout = setTimeout(resolve, 2000)
-						const handler = (auxes: boolean[]) => {
-							availableAuxes = auxes
-							clearTimeout(timeout)
-							this.client.off('availableAuxesChange', handler)
-							resolve(undefined)
-						}
-						this.client.on('availableAuxesChange', handler)
-					})
-				}
-				if (!availableAuxes || availableAuxes.length === 0) {
-					const fallbackCount = this.config.fallbackAuxCount ?? 16
-					this.log('warn', `No available auxes detected, defaulting to ${fallbackCount}.`)
-					availableAuxes = Array(fallbackCount).fill(true)
-				}
+		this.client.on('disconnect', () => {
+			this.updateStatus(InstanceStatus.Disconnected)
+		})
 
-				const maxFaders = this.config?.maxFaderCount ? this.config.maxFaderCount : 128
-				const failedFaderCommands = new Set<string>()
-				for (let i = 0; i < maxFaders; i++) {
-					const labelKey = `label:${i}`
-					if (failedFaderCommands.has(labelKey)) continue
-					try {
-						const label = await this.client.getFaderLabel(i)
-						let labelStr: string
-						if (typeof label === 'object' && label !== null && Buffer.isBuffer(label)) {
-							const labelBuf = label as Buffer
-							labelStr = labelBuf.slice(2).toString('ascii')
-							this.log(
-								'debug',
-								`(ready/getFaderLabel) Fader ${i} label buffer (ascii): [${labelBuf.slice(2).toString('hex')}]`,
-							)
-						} else {
-							labelStr = typeof label === 'string' ? label : String(label)
-						}
-						this.log('info', `Fader ${i + 1} label is ${labelStr}`)
-						this.log(
-							'debug',
-							`(ready/getFaderLabel) Fader ${i + 1} label typeof: ${typeof label}, value: ${JSON.stringify(label)}`,
-						)
-						this.log('debug', `(ready/getFaderLabel) Fader ${i + 1} labelStr: ${JSON.stringify(labelStr)}`)
-						const state = this.getOrInitFaderState(i)
-						state.label = labelStr
-						this.faderStates.set(i, state)
-						// Set variables for this fader (using 1-based fader ID for UI)
-						setVariableWithDeclaration(this, `fader_${i + 1}_label`, labelStr)
-						setVariableWithDeclaration(this, `fader_${i + 1}_level`, state.level)
-						setVariableWithDeclaration(this, `fader_${i + 1}_level_db`, state.levelDb)
-						setVariableWithDeclaration(this, `fader_${i + 1}_pfl`, state.isPfl ? 'On' : 'Off')
-						setVariableWithDeclaration(this, `fader_${i + 1}_cut`, state.isCut ? 'Cut' : 'On')
-					} catch (e: unknown) {
-						this.log(
-							'error',
-							`Failed to get label for fader ${i}: ${e instanceof Error ? e.message : String(e)}`,
-						)
-					}
-				}
-				this.log('info', 'setupEventListeners() ready handler completed')
-			})
+		// A single unanswered request isn't a broken connection; the action logs its own error.
+		this.client.on('requestTimeout', () => {
+			if (!this.client.isConnected) {
+				this.updateStatus(InstanceStatus.ConnectionFailure, 'Request timed out')
+			}
+		})
 
-			// Fader state change event listeners
-			this.client.on('faderLevelChange', async (faderId: number, level: number) => {
-				this.log('debug', `Fader ${faderId + 1} level changed to ${level}`)
-				const state = this.getOrInitFaderState(faderId)
-				state.level = level
-				// Convert level to dB for display
-				try {
-					const { channelLevelToDb } = await import('@bitfocusas/calrec-cscp')
-					state.levelDb = channelLevelToDb(level).toFixed(1)
-				} catch (e) {
-					state.levelDb = '-∞'
-				}
-				this.faderStates.set(faderId, state)
-				// Update variables (using 1-based fader ID for UI)
-				setVariableWithDeclaration(this, `fader_${faderId + 1}_level`, level)
-				setVariableWithDeclaration(this, `fader_${faderId + 1}_level_db`, state.levelDb)
-				this.checkFeedbacks('fader_cut_state', 'fader_pfl_state')
-			})
+		this.client.on('requestSuccess', () => {
+			this.updateStatus(InstanceStatus.Ok)
+		})
 
-			this.client.on('faderCutChange', (faderId: number, isCut: boolean) => {
-				this.log('debug', `Fader ${faderId + 1} cut state changed to ${isCut}`)
-				const state = this.getOrInitFaderState(faderId)
-				state.isCut = isCut
-				this.faderStates.set(faderId, state)
-				// Update variables (using 1-based fader ID for UI)
-				setVariableWithDeclaration(this, `fader_${faderId + 1}_cut`, isCut ? 'Cut' : 'On')
-				this.checkFeedbacks('fader_cut_state', 'fader_pfl_state')
-			})
+		this.client.on('mixerConstants', ({ numberOfFaders }: { numberOfFaders: number }) => {
+			if (numberOfFaders > 0) {
+				this.log('info', `Mixer reported ${numberOfFaders} faders`)
+				this.setPresetDefinitions(GetPresets(this))
+				this.setFeedbackDefinitions(GetFeedbacks(this))
+			}
+		})
 
-			this.client.on('faderPflChange', (faderId: number, isPfl: boolean) => {
-				this.log('debug', `Fader ${faderId + 1} PFL state changed to ${isPfl}`)
-				const state = this.getOrInitFaderState(faderId)
-				state.isPfl = isPfl
-				this.faderStates.set(faderId, state)
-				// Update variables (using 1-based fader ID for UI)
-				setVariableWithDeclaration(this, `fader_${faderId + 1}_pfl`, isPfl ? 'On' : 'Off')
-				this.checkFeedbacks('fader_cut_state', 'fader_pfl_state')
-			})
+		this.client.on('faderLevelChange', (faderId: number, levelTenthDb: number) => {
+			const db = levelTenthDb / 10
+			const state = this.getOrInitFaderState(faderId)
+			state.levelTenthDb = levelTenthDb
+			state.level = dbToChannelLevel(db)
+			state.levelDb = db.toFixed(1)
+			this.faderStates.set(faderId, state)
+			setVariableWithDeclaration(this, `fader_${faderId + 1}_level`, state.level)
+			setVariableWithDeclaration(this, `fader_${faderId + 1}_level_db`, state.levelDb)
+		})
 
-			this.client.on('faderLabelChange', (faderId: number, label: string) => {
-				this.log('debug', `Fader ${faderId + 1} label changed to ${label}`)
-				const state = this.getOrInitFaderState(faderId)
-				state.label = label
-				this.faderStates.set(faderId, state)
-				// Update variables (using 1-based fader ID for UI)
-				setVariableWithDeclaration(this, `fader_${faderId + 1}_label`, label)
-			})
+		this.client.on('faderCutChange', (faderId: number, isCut: boolean) => {
+			const state = this.getOrInitFaderState(faderId)
+			state.isCut = isCut
+			this.faderStates.set(faderId, state)
+			setVariableWithDeclaration(this, `fader_${faderId + 1}_cut`, isCut ? 'Cut' : 'On')
+			this.checkFeedbacks('fader_cut_state')
+		})
 
-			this.log('info', 'setupEventListeners() completed')
-		} catch (e: unknown) {
-			this.log('error', `setupEventListeners() failed: ${e instanceof Error ? e.message : String(e)}`)
-			throw e
-		}
+		this.client.on('faderPflChange', (faderId: number, isPfl: boolean) => {
+			const state = this.getOrInitFaderState(faderId)
+			state.isPfl = isPfl
+			this.faderStates.set(faderId, state)
+			setVariableWithDeclaration(this, `fader_${faderId + 1}_pfl`, isPfl ? 'On' : 'Off')
+			this.checkFeedbacks('fader_pfl_state')
+		})
+
+		this.client.on('faderLabelChange', (faderId: number, label: string) => {
+			const state = this.getOrInitFaderState(faderId)
+			state.label = label
+			this.faderStates.set(faderId, state)
+			setVariableWithDeclaration(this, `fader_${faderId + 1}_label`, label)
+		})
+	}
+
+	/** Fader count from the mixer; 0 until `mixer.constants` has been received. */
+	public getMaxFaderCount(): number {
+		return this.client?.numberOfFaders ?? 0
 	}
 
 	private getOrInitFaderState(faderId: number): FaderState {
 		let state = this.faderStates.get(faderId)
 		if (!state) {
 			state = {
+				levelTenthDb: 0,
 				level: 0,
 				levelDb: '-∞',
 				isCut: false,
@@ -231,4 +167,4 @@ export class CalrecInstance extends InstanceBase<CalrecConfig> {
 	}
 }
 
-runEntrypoint(CalrecInstance, [])
+runEntrypoint(CalrecInstance, UpgradeScripts)

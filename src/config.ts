@@ -3,9 +3,11 @@ import type { SomeCompanionConfigField } from '@companion-module/base'
 export interface CalrecConfig {
 	host: string
 	port: number
-	fallbackAuxCount?: number
-	maxFaderCount?: number
-	enableStereoWidthVariables?: boolean
+	username: string
+}
+
+export interface CalrecSecrets {
+	password: string
 }
 
 export function GetConfigFields(): SomeCompanionConfigField[] {
@@ -13,7 +15,7 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 		{
 			type: 'textinput',
 			id: 'host',
-			label: 'Target IP',
+			label: 'Calrec Assist IP',
 			width: 8,
 		},
 		{
@@ -21,34 +23,22 @@ export function GetConfigFields(): SomeCompanionConfigField[] {
 			id: 'port',
 			label: 'Target Port',
 			width: 4,
-			default: 23,
+			default: 80,
 			min: 1,
 			max: 65535,
 		},
 		{
-			type: 'number',
-			id: 'fallbackAuxCount',
-			label: 'Fallback Aux Count (if autodetect fails)',
-			width: 4,
-			default: 16,
-			min: 1,
-			max: 32,
+			type: 'textinput',
+			id: 'username',
+			label: 'Username',
+			width: 6,
+			default: 'Engineer',
 		},
 		{
-			type: 'number',
-			id: 'maxFaderCount',
-			label: 'Max Fader Count',
-			width: 4,
-			default: 128,
-			min: 1,
-			max: 128,
-		},
-		{
-			type: 'checkbox',
-			id: 'enableStereoWidthVariables',
-			label: 'Enable Stereo Width Variables',
-			default: true,
-			width: 4,
+			type: 'secret-text',
+			id: 'password',
+			label: 'Password',
+			width: 6,
 		},
 	]
 }

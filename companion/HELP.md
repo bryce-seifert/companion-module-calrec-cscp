@@ -1,11 +1,13 @@
-## Calrec CSCP Module
+## Calrec Assist
 
-This module provides integration with Calrec audio consoles using the CSCP (Calrec Serial Control Protocol).
+This module provides integration with Calrec Assist.
 
 ### Configuration
 
-- **Target IP**: The IP address of your Calrec console
-- **Target Port**: The port number for CSCP communication (default: 23)
+- **Calrec Assist IP**: The IP address of Calrec Assist
+- **Target Port**: HTTP port for the GraphQL API (default: 80)
+- **Username**: Assist login username (default: Engineer)
+- **Password**: Assist login password (stored as a secret)
 
 ### Actions
 
