@@ -6,7 +6,7 @@ import { GetFeedbacks } from './feedbacks.js'
 import { CalrecGraphQLClient } from './graphql-client.js'
 import { GetPresets } from './presets.js'
 import { UpgradeScripts } from './upgrades.js'
-import { setVariableWithDeclaration } from './variables.js'
+import { resetVariables, setVariableWithDeclaration } from './variables.js'
 
 interface FaderState {
 	/** Console-native level in tenths of a dB (+10 dB = 100). */
@@ -24,14 +24,17 @@ export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 	public secrets!: CalrecSecrets
 	public client!: CalrecGraphQLClient
 	public faderStates: Map<number, FaderState> = new Map()
+	/** Set by init(); the console snapshot is logged once, on the first connection after startup. */
+	private snapshotPending = false
+	/** Fader count the current preset/feedback definitions were built for; -1 until the mixer reports one. */
+	private definitionsFaderCount = -1
 
 	async init(config: CalrecConfig, _isFirstInit: boolean, secrets: CalrecSecrets): Promise<void> {
 		this.log('info', 'init() called')
 		try {
 			this.updateStatus(InstanceStatus.Connecting)
+			this.snapshotPending = true
 			await this.configUpdated(config, secrets)
-			// One-shot: log what the console reported, as a baseline for diagnosing connection issues.
-			this.client.once('ready', () => setTimeout(() => this.logConsoleSnapshot(24), 5000))
 			this.log('info', 'init() completed successfully')
 		} catch (e: unknown) {
 			this.log('error', `init() failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -40,6 +43,7 @@ export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 	}
 
 	async destroy(): Promise<void> {
+		resetVariables(this)
 		if (this.client) {
 			this.client.disconnect()
 		}
@@ -54,6 +58,7 @@ export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 		this.updateStatus(InstanceStatus.Connecting)
 
 		// Actions are fixed; presets/feedbacks wait for mixer.constants.numberOfFaders.
+		this.definitionsFaderCount = -1
 		this.setActionDefinitions(GetActions(this))
 		this.setFeedbackDefinitions(GetFeedbacks(this))
 		this.setPresetDefinitions(GetPresets(this))
@@ -104,11 +109,25 @@ export class CalrecInstance extends InstanceBase<CalrecConfig, CalrecSecrets> {
 			this.updateStatus(InstanceStatus.Ok)
 		})
 
+		this.client.on('ready', () => {
+			// The client drops its fader map on every (re)connect; drop ours too so variables for faders the
+			// console no longer reports don't linger.
+			this.faderStates.clear()
+			if (this.snapshotPending) {
+				this.snapshotPending = false
+				setTimeout(() => this.logConsoleSnapshot(24), 5000)
+			}
+		})
+
 		this.client.on('mixerConstants', ({ numberOfFaders }: { numberOfFaders: number }) => {
 			if (numberOfFaders > 0) {
 				this.log('info', `Mixer reported ${numberOfFaders} faders`)
-				this.setPresetDefinitions(GetPresets(this))
-				this.setFeedbackDefinitions(GetFeedbacks(this))
+				// Presets and feedbacks are sized by the fader count, so only rebuild when it actually moves.
+				if (numberOfFaders !== this.definitionsFaderCount) {
+					this.definitionsFaderCount = numberOfFaders
+					this.setPresetDefinitions(GetPresets(this))
+					this.setFeedbackDefinitions(GetFeedbacks(this))
+				}
 			}
 		})
 

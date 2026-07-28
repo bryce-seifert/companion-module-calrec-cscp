@@ -15,7 +15,6 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 					min: 1,
 					max: 256,
 				},
-				{ type: 'checkbox', label: 'Main', id: 'isMain', default: false },
 				{
 					type: 'number',
 					label: 'Level (0-1023)',
@@ -52,7 +51,6 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 					min: 1,
 					max: 256,
 				},
-				{ type: 'checkbox', label: 'Main', id: 'isMain', default: false },
 				{
 					type: 'number',
 					label: 'Level (dB)',
@@ -88,7 +86,6 @@ export function GetActions(instance: CalrecInstance): CompanionActionDefinitions
 					min: 1,
 					max: 256,
 				},
-				{ type: 'checkbox', label: 'Main', id: 'isMain', default: false },
 				{
 					type: 'dropdown',
 					label: 'State',

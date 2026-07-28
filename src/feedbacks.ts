@@ -19,7 +19,7 @@ export function GetFeedbacks(instance: CalrecInstance): CompanionFeedbackDefinit
 					id: 'faderId',
 					default: 1,
 					min: 1,
-					max: maxFaders + 1,
+					max: Math.max(1, maxFaders),
 				},
 			],
 			callback: (feedback) => {
@@ -43,7 +43,7 @@ export function GetFeedbacks(instance: CalrecInstance): CompanionFeedbackDefinit
 					id: 'faderId',
 					default: 1,
 					min: 1,
-					max: maxFaders + 1,
+					max: Math.max(1, maxFaders),
 				},
 			],
 			callback: (feedback) => {

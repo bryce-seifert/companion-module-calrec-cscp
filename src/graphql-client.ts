@@ -16,8 +16,11 @@ export interface CalrecGraphQLClientOptions {
 export interface GraphQLFaderState {
 	faderNumber: number
 	label: string
-	/** Fader level in tenths of a dB (console-native scale; +10 dB = 100). */
-	levelTenthDb: number
+	/**
+	 * Fader level in tenths of a dB (console-native scale; +10 dB = 100), or undefined when the console
+	 * hasn't reported one. Never default this to 0 — that is unity gain, not silence.
+	 */
+	levelTenthDb?: number
 	isCut: boolean
 	isPfl: boolean
 	hasPath: boolean
@@ -71,6 +74,19 @@ const PROTOCOL = 'graphql-transport-ws'
 export const FADER_MIN_DB = -90
 export const FADER_MAX_DB = 10
 
+/**
+ * The console assigns its own identity to a session (e.g. "Engineer-01" for user "Engineer"); it's in the
+ * login JWT's claims and worth logging. Never log the token itself.
+ */
+function readTokenUserId(token: string): string | undefined {
+	try {
+		const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as { userId?: string }
+		return typeof claims.userId === 'string' ? claims.userId : undefined
+	} catch {
+		return undefined
+	}
+}
+
 /** Pull a readable operation name out of a query body, e.g. `updateFader` from `mutation($n:Int){ updateFader(...` */
 function operationName(query: string): string {
 	return /\{\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(query)?.[1] ?? query.slice(0, 40)
@@ -85,8 +101,9 @@ function normalizePointer(op: Operation): Operation {
 }
 
 /**
- * Mutations answer with `MutationResult { result: String }`. The console isn't consistent about what a
- * success string looks like, so only flag results that clearly report a failure.
+ * Mutations answer with `MutationResult { result: String }` — "OK" on success, as observed on a desk.
+ * Other success strings may exist, so rather than requiring "OK" we only flag results that clearly
+ * report a failure.
  */
 function failedMutationResult(data: unknown): string | undefined {
 	const record = data as Record<string, { result?: unknown } | undefined> | undefined
@@ -110,6 +127,8 @@ export class CalrecGraphQLClient extends EventEmitter {
 
 	private ws?: WebSocket
 	private token?: string
+	/** Session identity the console assigned at login (from the token claims), for diagnostics. */
+	private userId?: string
 	private closing = false
 	private reconnectTimer?: NodeJS.Timeout
 	private nextRequestId = 0
@@ -129,6 +148,8 @@ export class CalrecGraphQLClient extends EventEmitter {
 	public numberOfSections = 8
 	public numberOfFadersPerSection = 6
 	private subscribedSections = 0
+	/** Whether `mixerConstants` has been emitted for the current connection. */
+	private constantsReported = false
 	/** In-flight/queued relative level steps, keyed by fader number. */
 	private readonly levelQueues = new Map<number, LevelQueue>()
 	/** Subscription error messages already warned about, so a repeating error doesn't flood the log. */
@@ -199,6 +220,7 @@ export class CalrecGraphQLClient extends EventEmitter {
 		const json = (await res.json()) as { data?: { login?: { result?: string; token?: string } } }
 		const token = json.data?.login?.token
 		if (!token) throw new Error('Login failed: no token returned (check username/password)')
+		this.userId = readTokenUserId(token)
 		return token
 	}
 
@@ -335,12 +357,43 @@ export class CalrecGraphQLClient extends EventEmitter {
 	}
 
 	private onReady(): void {
-		// (Re)subscribe to every surface section so we track all faders.
+		// A new socket invalidates every subscription id; drop the old ones or they accumulate per reconnect.
+		this.subscriptions.clear()
 		this.faders.clear()
 		this.subscribedSections = 0
+		this.constantsReported = false
+		// Section subscriptions wait for mixer.constants — subscribing to a guessed section count asks the
+		// console for sections that may not exist. subscribeMixerConstants' callback drives them instead.
 		this.subscribeMixerConstants()
-		this.ensureSectionSubscriptions()
+		void this.logConnectionInfo()
 		this.emit('ready')
+	}
+
+	/**
+	 * Log what the console says it is, once per connection. Firmware version and model are the first things
+	 * to compare when one site works and another doesn't.
+	 */
+	private async logConnectionInfo(): Promise<void> {
+		try {
+			const data = (await this.request(
+				'subscription{ core{ software{ version } info{ name designation state } } mixer{ info{ index name } } system{ info{ name } } }',
+			)) as {
+				core?: { software?: { version?: string }; info?: { name?: string; designation?: string; state?: string } }
+				mixer?: { info?: { index?: number; name?: string } }
+				system?: { info?: { name?: string } }
+			}
+
+			const core = data?.core
+			this.log(
+				'debug',
+				`Console: ${data?.system?.info?.name ?? 'unknown'} "${core?.info?.name ?? 'unknown'}" ` +
+					`software ${core?.software?.version ?? 'unknown'}, core ${core?.info?.designation ?? '?'}/${core?.info?.state ?? '?'}, ` +
+					`mixer ${data?.mixer?.info?.index ?? '?'} "${data?.mixer?.info?.name ?? 'unknown'}", ` +
+					`logged in as ${this.username}${this.userId ? ` (${this.userId})` : ''}`,
+			)
+		} catch (e) {
+			this.log('debug', `Could not read console info: ${e instanceof Error ? e.message : String(e)}`)
+		}
 	}
 
 	private send(message: unknown): void {
@@ -395,7 +448,8 @@ export class CalrecGraphQLClient extends EventEmitter {
 		const pending = this.pendingRequests.get(id)
 		if (pending) {
 			this.pendingRequests.delete(id)
-			// Stop the server-side operation; one-shots only ever need the first frame.
+			// Stop the server-side operation; one-shots only ever need the first frame. Verified safe on a
+			// desk: the console accepts the frame and answers with its own `complete`.
 			this.send({ id, type: 'complete' })
 			this.log('debug', `Received GraphQL response for ${pending.name} (${id}): ${JSON.stringify(payload)}`)
 			const requestError = payload?.errors?.[0]?.message
@@ -505,7 +559,10 @@ export class CalrecGraphQLClient extends EventEmitter {
 
 			this.ensureSectionSubscriptions()
 
-			if (changed) {
+			// Always report once per connection, so a reconnect rebuilds presets/feedbacks even when the
+			// values match what the previous connection saw.
+			if (changed || !this.constantsReported) {
+				this.constantsReported = true
 				this.emit('mixerConstants', {
 					numberOfFaders: this.numberOfFaders,
 					numberOfSections: this.numberOfSections,
@@ -543,22 +600,25 @@ export class CalrecGraphQLClient extends EventEmitter {
 		const sub = entry.faderLayer?.faderSubLayer
 		const info = sub?.path?.info
 		const pathFader = sub?.path?.fader
+		const prev = this.faders.get(faderNumber)
 		const next: GraphQLFaderState = {
 			faderNumber,
 			hasPath: !!info?.path,
 			label: info?.name || info?.label || '',
-			levelTenthDb: typeof pathFader?.level === 'number' ? pathFader.level : 0,
+			// A patch that doesn't carry the level must not reset it: keep the last value we were told.
+			levelTenthDb: typeof pathFader?.level === 'number' ? pathFader.level : prev?.levelTenthDb,
 			isCut: !!pathFader?.isCut,
 			isPfl: !!sub?.path?.apfl?.isPflActive,
 			pathId: info?.path ?? undefined,
 			faderId: sub?.faderId ?? undefined,
 		}
 
-		const prev = this.faders.get(faderNumber)
 		this.faders.set(faderNumber, next)
 
 		if (!prev || prev.label !== next.label) this.emit('faderLabelChange', faderNumber, next.label)
-		if (!prev || prev.levelTenthDb !== next.levelTenthDb) this.emit('faderLevelChange', faderNumber, next.levelTenthDb)
+		if (next.levelTenthDb !== undefined && (!prev || prev.levelTenthDb !== next.levelTenthDb)) {
+			this.emit('faderLevelChange', faderNumber, next.levelTenthDb)
+		}
 		if (!prev || prev.isCut !== next.isCut) this.emit('faderCutChange', faderNumber, next.isCut)
 		if (!prev || prev.isPfl !== next.isPfl) this.emit('faderPflChange', faderNumber, next.isPfl)
 	}
@@ -586,7 +646,8 @@ export class CalrecGraphQLClient extends EventEmitter {
 			lines.push(
 				`  Fader ${fader.faderNumber + 1} (faderNumber ${fader.faderNumber}): ` +
 					`path=${fader.pathId ?? 'none'} faderId=${fader.faderId ?? 'none'} ` +
-					`level=${(fader.levelTenthDb / 10).toFixed(1)}dB cut=${fader.isCut} pfl=${fader.isPfl} ` +
+					`level=${fader.levelTenthDb === undefined ? 'unknown' : `${(fader.levelTenthDb / 10).toFixed(1)}dB`} ` +
+					`cut=${fader.isCut} pfl=${fader.isPfl} ` +
 					`label="${fader.label}"`,
 			)
 		}
@@ -596,13 +657,21 @@ export class CalrecGraphQLClient extends EventEmitter {
 
 	// --- Mutations -----------------------------------------------------------
 
-	/** Set a fader to an absolute level. `db` is in dB; the console scale is tenths of a dB. */
+	/**
+	 * Set a fader to an absolute level. `db` is in dB; the console scale is tenths of a dB.
+	 *
+	 * Addresses by faderNumber plus path when we know it. `path` is a selector, not an assignment —
+	 * verified on a desk: writing with it moves the level and leaves `path.info.path` untouched. When no
+	 * state has arrived for the fader we still try faderNumber on its own, which the console also accepts.
+	 */
 	async setFaderLevelDb(faderNumber: number, db: number): Promise<void> {
-		const state = this.requireFader(faderNumber)
-		// Address by both faderNumber and path: some consoles only resolve the target from the path.
+		const pathId = this.faders.get(faderNumber)?.pathId
+		if (!pathId) {
+			this.log('warn', `No path known for fader ${faderNumber + 1}; addressing by fader number alone`)
+		}
 		await this.request(
 			'mutation($n:Int,$p:String,$a:Int){ updateFader(faderNumber:$n, path:$p, level_Action:{ absolute:$a }){ result } }',
-			{ n: faderNumber, p: state.pathId, a: Math.round(db * 10) },
+			{ n: faderNumber, p: pathId ?? null, a: Math.round(db * 10) },
 		)
 	}
 
@@ -616,9 +685,18 @@ export class CalrecGraphQLClient extends EventEmitter {
 		minDb = FADER_MIN_DB,
 		maxDb = FADER_MAX_DB,
 	): Promise<number> {
-		const state = this.requireFader(faderNumber)
 		const queued = this.levelQueues.get(faderNumber)
-		const currentDb = queued ? queued.target : state.levelTenthDb / 10
+		let currentDb: number
+		if (queued) {
+			currentDb = queued.target
+		} else {
+			// A relative move needs a real starting point; guessing 0 dB would slam the fader to unity.
+			const state = this.requireFader(faderNumber)
+			if (state.levelTenthDb === undefined) {
+				throw new Error(`Console has not reported a level for fader ${faderNumber + 1}; cannot adjust it relatively`)
+			}
+			currentDb = state.levelTenthDb / 10
+		}
 		const target = Math.min(maxDb, Math.max(minDb, currentDb + stepDb))
 
 		if (queued) {

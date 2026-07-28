@@ -124,7 +124,7 @@ export function GetPresets(instance: CalrecInstance): {
 			feedbacks: [{ feedbackId: 'fader_pfl_state', options: { faderId: n }, style: { bgcolor: COLOR_PFL } }],
 			steps: [
 				{
-					down: [{ actionId: 'set_fader_pfl_unified', options: { faderId: n, isMain: false, state: 'toggle' } }],
+					down: [{ actionId: 'set_fader_pfl_unified', options: { faderId: n, state: 'toggle' } }],
 					up: [],
 				},
 			],
